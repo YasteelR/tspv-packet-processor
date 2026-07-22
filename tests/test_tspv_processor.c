@@ -189,11 +189,37 @@ static void test_OutOfOrderPacketBuffersAndRequestsGap(void)
     }
 }
 
+static void test_SecondEarlyPacketDoesNotReRequestOutstandingIds(void)
+{
+    installMocks();
+    uint32_t epoch = 1500000u;
+    uint8_t pkt[20];
+
+    buildPacket(pkt, 1, 1, epoch, 0, 0, 0, 1.0f, 0, 0, 10, 1.1f);
+    receiveMSG(pkt, sizeof pkt);
+
+    /* Packet 5 arrives early -> requests 2, 3, 4. */
+    buildPacket(pkt, 1, 5, epoch + 240, 0, 0, 0, 5.0f, 0, 0, 10, 5.1f);
+    receiveMSG(pkt, sizeof pkt);
+    CHECK(s_requestedCount == 3);
+
+    /* Packet 6 arrives before the gap is filled: 2, 3, 4 are still
+     * outstanding and must not be requested a second time - only the
+     * newly-discovered gap (5) should trigger a fresh request. */
+    buildPacket(pkt, 1, 6, epoch + 300, 0, 0, 0, 6.0f, 0, 0, 10, 6.1f);
+    receiveMSG(pkt, sizeof pkt);
+    CHECK(s_requestedCount == 4);
+    if (s_requestedCount == 4) {
+        CHECK(s_requestedIds[3] == 5);
+    }
+}
+
 int main(void)
 {
     RUN_TEST(unitTEST1);
     RUN_TEST(test_MalformedLengthIsIgnored);
     RUN_TEST(test_OutOfOrderPacketBuffersAndRequestsGap);
+    RUN_TEST(test_SecondEarlyPacketDoesNotReRequestOutstandingIds);
 
     printf("\n%d assertions, %d failures\n", g_assertions, g_failures);
     return g_failures == 0 ? 0 : 1;

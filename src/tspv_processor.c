@@ -21,6 +21,7 @@ typedef struct {
 } PendingSlot;
 
 static PendingSlot s_pending[PENDING_CAPACITY];
+static bool s_requested[256];
 
 static bool s_haveBaseline;
 static uint8_t s_nextExpectedId;
@@ -77,6 +78,16 @@ static void storePending(uint8_t id, const uint8_t *data)
      * the device only ever has a handful of packets outstanding. */
 }
 
+static void requestIfNeeded(uint8_t id)
+{
+    if (!s_requested[id]) {
+        s_requested[id] = true;
+        if (s_requestFn) {
+            s_requestFn(id);
+        }
+    }
+}
+
 /* First packet ever seen becomes the sequence's starting point; after
  * that, anything that isn't exactly the next expected PacketID gets
  * buffered and the gap is requested from the device. Applying buffered
@@ -100,19 +111,21 @@ void receiveMSG(uint8_t *data, uint8_t length)
     }
 
     if (id == s_nextExpectedId) {
+        s_requested[id] = false;
         processPacketBytes(data);
         s_nextExpectedId = nextId(id);
         return;
     }
 
     /* Out of order: hold on to it and ask the device to resend
-     * whatever is missing in between. */
+     * whatever is missing in between. Each missing ID is only
+     * requested once - if a second out-of-order packet arrives before
+     * the first gap is filled, IDs already outstanding must not be
+     * re-requested. */
     storePending(id, data);
     uint8_t missing = s_nextExpectedId;
     while (missing != id) {
-        if (s_requestFn) {
-            s_requestFn(missing);
-        }
+        requestIfNeeded(missing);
         missing = nextId(missing);
     }
 }
@@ -146,4 +159,5 @@ void tspv_resetState(void)
     for (unsigned i = 0; i < PENDING_CAPACITY; ++i) {
         s_pending[i].used = false;
     }
+    memset(s_requested, 0, sizeof(s_requested));
 }
