@@ -148,3 +148,8 @@ cmake --build build
 `tspv_tests` prints a `PASS`/`FAIL` line for any failing assertion and a
 final `N assertions, N failures` summary, exiting non-zero on failure —
 suitable for CI.
+
+## Development notes
+
+Developed with LLM assistance for scaffolding, review, tests, and debugging
+under my direction and review.
