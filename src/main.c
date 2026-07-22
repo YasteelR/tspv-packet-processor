@@ -49,7 +49,10 @@ int main(void)
     uint32_t epoch = 1700000000u;
     uint8_t pkt[20];
 
-    printf("--- packet 4: baseline, in order ---\n");
+    printf("--- app startup: request latest data (PacketID 0) ---\n");
+    tspv_start();
+
+    printf("\n--- packet 4: baseline, in order ---\n");
     buildPacket(pkt, 1, 4, epoch, 0x02, 0x20, 0, 21.5f, 0x03, 0x10, 10, 21.7f);
     receiveMSG(pkt, sizeof pkt);
 
@@ -75,6 +78,16 @@ int main(void)
 
     printf("\n--- packet 20 resent as a stale duplicate ---\n");
     receiveMSG(pkt, sizeof pkt); /* ignored, already processed */
+
+    printf("\n--- packet 25 arrives early (21-24 missing) ---\n");
+    buildPacket(pkt, 1, 25, epoch + 1200, 0x02, 0x20, 0, 35.0f, 0x03, 0x10, 10, 35.1f);
+    receiveMSG(pkt, sizeof pkt); /* buffered, requests issued for 21-24 */
+
+    printf("\n--- packet 40 arrives (gap of 15, unrecoverable) ---\n");
+    printf("    21-24 are lost, but packet 25's data is already in hand\n");
+    printf("    and gets salvaged instead of thrown away:\n");
+    buildPacket(pkt, 1, 40, epoch + 1800, 0x02, 0x20, 0, 40.0f, 0x03, 0x10, 10, 40.1f);
+    receiveMSG(pkt, sizeof pkt); /* posts 25's TSPVs, then 40's */
 
     return 0;
 }

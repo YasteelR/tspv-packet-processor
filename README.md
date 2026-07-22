@@ -37,6 +37,15 @@ two function-pointer hooks (`tspv_setHooks`) so unit tests can substitute
 mocks and assert on exactly what was requested/posted without touching
 global symbols or capturing stdout.
 
+One additional function, `tspv_start(void)`, is provided beyond the three
+named in the spec: PacketID 0 is described as "reserved for asking the
+device the latest data when you start your app", but that request has to
+actually be sent by *something*. Call `tspv_start()` once at application
+startup, before any packet has arrived - it issues that request via the
+same `requestOldPacket` mechanism (`requestOldPacket(0)`). The device's
+reply is just an ordinary packet with a real, non-zero ID, so it's handled
+by `receiveMSG` exactly like the first packet ever seen.
+
 ## Algorithm
 
 State kept between calls to `receiveMSG`:
@@ -59,12 +68,13 @@ For each incoming packet:
    the device's 4-packet retransmit window: buffer the packet and call
    `requestOldPacket()` for each missing ID in between (each ID is only
    requested once until it's resolved).
-5. **`id` is ahead of `nextExpectedId` by > 4** → the missing packets can
-   never be recovered (the device has already discarded them from its
+5. **`id` is ahead of `nextExpectedId` by > 4** → at least one missing ID
+   can never be recovered (the device has already discarded it from its
    own 4-packet history). Per "process as much data as possible unless
-   not possible", the unrecoverable gap is skipped: any buffered packets
-   and outstanding requests are dropped, and processing resumes from the
-   new packet.
+   not possible", genuinely missing IDs are skipped, but anything already
+   sitting in the buffer *was* actually received and is still processed
+   (in order, ahead of the new packet) rather than thrown away - only
+   the true holes are given up on.
 
 Within a packet, each TSPV is posted individually only if its absolute
 time is strictly newer than the last TSPV actually posted; otherwise it is
@@ -85,8 +95,18 @@ production transport stack:
 - `requestOldPacket`/`postTSPV` just log; wiring them to real hardware I/O
   is a one-line change at the call site since they're already isolated
   behind hooks.
-- Multi-byte fields are assumed big-endian, matching the worked example in
-  the problem statement.
+- Multi-byte fields are assumed big-endian (standard network byte order);
+  the worked example's epoch bytes decode to a plausible real-world date
+  under that assumption, though the example alone can't fully prove it.
+- "The device stores the last 4 sent packets" is read as: a gap of up to
+  4 missing PacketIDs is treated as recoverable, more than 4 is not. The
+  spec doesn't pin down whether that 4-packet window includes the packet
+  that was just sent or not, so a gap of exactly 4 could, in the strictest
+  reading, include one ID the device has already evicted. Given the
+  ambiguity, this implementation takes the more generous reading (always
+  attempt recovery for a gap of <= 4) rather than guessing conservatively;
+  a real integration would confirm the exact retention window against the
+  device's actual protocol documentation.
 
 ## Project layout
 

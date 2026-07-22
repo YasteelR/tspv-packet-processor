@@ -131,14 +131,6 @@ static PendingSlot *findPending(uint8_t id)
     return NULL;
 }
 
-static void discardAllPending(void)
-{
-    for (unsigned i = 0; i < PENDING_CAPACITY; ++i) {
-        s_pending[i].used = false;
-    }
-    memset(s_requested, 0, sizeof(s_requested));
-}
-
 /* Applies any buffered packets that have become contiguous with
  * s_nextExpectedId, in ID order, for as long as the buffer allows. */
 static void flushPending(void)
@@ -156,6 +148,32 @@ static void flushPending(void)
 
         processPacketBytes(data);
         s_nextExpectedId = nextId(id);
+    }
+}
+
+/* Called when a gap is too big for the device to ever fill (see the
+ * TSPV_RECOVERABLE_GAP check in receiveMSG). Genuinely missing IDs are
+ * unrecoverable and get skipped, but anything already sitting in the
+ * pending buffer was actually received and must still be processed -
+ * throwing it away would violate "process as much data as possible,
+ * unless not possible" for data we already have in hand. */
+static void skipUnrecoverableGapUpTo(uint8_t id)
+{
+    while (s_nextExpectedId != id) {
+        PendingSlot *slot = findPending(s_nextExpectedId);
+        if (slot) {
+            uint8_t data[TSPV_PACKET_LENGTH];
+            uint8_t pid = slot->id;
+            memcpy(data, slot->data, TSPV_PACKET_LENGTH);
+            slot->used = false;
+            s_requested[pid] = false;
+            processPacketBytes(data);
+            s_nextExpectedId = nextId(pid);
+        } else {
+            /* Truly lost - the device no longer has it. */
+            s_requested[s_nextExpectedId] = false;
+            s_nextExpectedId = nextId(s_nextExpectedId);
+        }
     }
 }
 
@@ -215,13 +233,20 @@ void receiveMSG(uint8_t *data, uint8_t length)
         return;
     }
 
-    /* Gap is bigger than the device's history: the missing packets can
-     * never be recovered, so the only option is to skip ahead and keep
-     * processing from here. */
-    discardAllPending();
+    /* Gap is bigger than the device's history: at least one missing ID
+     * can never be recovered. Salvage whatever's already buffered on
+     * the way there, skip the genuine holes, then process this packet. */
+    skipUnrecoverableGapUpTo(id);
     processPacketBytes(data);
     s_nextExpectedId = nextId(id);
     flushPending();
+}
+
+void tspv_start(void)
+{
+    if (s_requestFn) {
+        s_requestFn(0);
+    }
 }
 
 uint8_t *requestOldPacket(uint8_t packetid)

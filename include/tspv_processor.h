@@ -36,6 +36,14 @@ uint8_t *requestOldPacket(uint8_t packetid);
 /* Delivers one decoded TSPV to whatever consumes the data. */
 void postTSPV(uint8_t stat1, uint8_t stat2, float pv);
 
+/* Call once when the application starts, before any packet has been
+ * received. PacketID 0 is reserved by the device for exactly this:
+ * asking it to send its latest data. The reply is an ordinary packet
+ * with a real, non-zero PacketID and is handled by receiveMSG() like
+ * any other - whatever ID it carries becomes the sequence's starting
+ * point, same as the first packet ever seen. */
+void tspv_start(void);
+
 /* ---- Test/simulation support ---------------------------------------
  * receiveMSG() calls requestOldPacket()/postTSPV() indirectly through
  * these hooks so unit tests can substitute mocks without touching

@@ -324,7 +324,7 @@ static void test_StaleDuplicateIsIgnored(void)
     CHECK(s_requestedCount == 0);
 }
 
-static void test_UnrecoverableGapSkipsAhead(void)
+static void test_UnrecoverableGapSkipsHolesButSalvagesBuffered(void)
 {
     installMocks();
     uint32_t epoch = 2400000u;
@@ -339,18 +339,64 @@ static void test_UnrecoverableGapSkipsAhead(void)
     CHECK(s_requestedCount == 3);
 
     /* Packet 20 arrives: the gap from "2" to "20" is 18, well beyond
-     * what the device can still supply (it only keeps its last 4) -
-     * skip ahead, dropping the buffered packet 5 and the outstanding
-     * requests, and process 20 directly. */
+     * what the device can still supply (it only keeps its last 4), so
+     * 2, 3, 4 are genuinely unrecoverable and get skipped. Packet 5,
+     * though, is sitting right there in the buffer - it was actually
+     * received, so it must still be processed (in order, ahead of 20)
+     * rather than thrown away just because 2-4 are lost. */
     buildPacket(pkt, 1, 20, epoch + 900, 0, 0, 0, 20.0f, 0, 0, 10, 20.1f);
     receiveMSG(pkt, sizeof pkt);
 
-    CHECK(s_postedCount == 4); /* packet 1 (2) + packet 20 (2); 5 was dropped */
+    CHECK(s_postedCount == 6); /* packet 1 (2) + packet 5 salvaged (2) + packet 20 (2) */
+    if (s_postedCount == 6) {
+        CHECK(s_posted[2].pv == 5.0f);
+        CHECK(s_posted[3].pv == 5.1f);
+        CHECK(s_posted[4].pv == 20.0f);
+        CHECK(s_posted[5].pv == 20.1f);
+    }
+    CHECK(s_requestedCount == 3); /* no new requests were made for the skip */
+}
+
+static void test_UnrecoverableGapWithNothingBufferedSkipsCleanly(void)
+{
+    installMocks();
+    uint32_t epoch = 2450000u;
+    uint8_t pkt[20];
+
+    buildPacket(pkt, 1, 1, epoch, 0, 0, 0, 1.0f, 0, 0, 10, 1.1f);
+    receiveMSG(pkt, sizeof pkt);
+
+    /* Packet 20 arrives directly, nothing buffered in between - every
+     * missing ID (2..19) is genuinely lost, none can be salvaged. */
+    buildPacket(pkt, 1, 20, epoch + 900, 0, 0, 0, 20.0f, 0, 0, 10, 20.1f);
+    receiveMSG(pkt, sizeof pkt);
+
+    CHECK(s_postedCount == 4);
     if (s_postedCount == 4) {
         CHECK(s_posted[2].pv == 20.0f);
         CHECK(s_posted[3].pv == 20.1f);
     }
-    CHECK(s_requestedCount == 3); /* no new requests were made for the skip */
+    CHECK(s_requestedCount == 0); /* gap was unrecoverable from the start */
+}
+
+static void test_StartRequestsLatestDataViaPacketIdZero(void)
+{
+    installMocks();
+
+    tspv_start();
+
+    CHECK(s_requestedCount == 1);
+    if (s_requestedCount == 1) {
+        CHECK(s_requestedIds[0] == 0);
+    }
+    CHECK(s_postedCount == 0); /* nothing posted until a real reply arrives */
+
+    /* The device's reply is an ordinary packet with a real ID - handled
+     * like any other first-ever packet, establishing the baseline. */
+    uint8_t pkt[20];
+    buildPacket(pkt, 1, 42, 3000000u, 0, 0, 0, 7.0f, 0, 0, 10, 7.1f);
+    receiveMSG(pkt, sizeof pkt);
+    CHECK(s_postedCount == 2);
 }
 
 static void test_EarlierTimeTSPVIsSkippedButSequenceAdvances(void)
@@ -439,7 +485,9 @@ int main(void)
     RUN_TEST(test_SecondEarlyPacketDoesNotReRequestOutstandingIds);
     RUN_TEST(test_GapFillCascadesBufferedPacketsInOrder);
     RUN_TEST(test_StaleDuplicateIsIgnored);
-    RUN_TEST(test_UnrecoverableGapSkipsAhead);
+    RUN_TEST(test_UnrecoverableGapSkipsHolesButSalvagesBuffered);
+    RUN_TEST(test_UnrecoverableGapWithNothingBufferedSkipsCleanly);
+    RUN_TEST(test_StartRequestsLatestDataViaPacketIdZero);
     RUN_TEST(test_SequenceWrapsAroundPast255);
     RUN_TEST(test_OutOfOrderGapAcrossWraparoundBoundary);
     RUN_TEST(test_EarlierTimeTSPVIsSkippedButSequenceAdvances);
