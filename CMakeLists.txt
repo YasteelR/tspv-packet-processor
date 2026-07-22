@@ -17,6 +17,9 @@ add_library(tspv_processor STATIC
 )
 target_include_directories(tspv_processor PUBLIC include)
 
+add_executable(tspv_demo src/main.c)
+target_link_libraries(tspv_demo PRIVATE tspv_processor)
+
 enable_testing()
 add_executable(tspv_tests tests/test_tspv_processor.c)
 target_link_libraries(tspv_tests PRIVATE tspv_processor)
