@@ -302,6 +302,55 @@ static void test_UnrecoverableGapSkipsAhead(void)
     CHECK(s_requestedCount == 3); /* no new requests were made for the skip */
 }
 
+static void test_SequenceWrapsAroundPast255(void)
+{
+    installMocks();
+    uint32_t epoch = 2700000u;
+    uint8_t pkt[20];
+
+    buildPacket(pkt, 1, 254, epoch, 0, 0, 0, 1.0f, 0, 0, 10, 1.1f);
+    receiveMSG(pkt, sizeof pkt);
+    buildPacket(pkt, 1, 255, epoch + 60, 0, 0, 0, 2.0f, 0, 0, 10, 2.1f);
+    receiveMSG(pkt, sizeof pkt);
+    /* After 255 the device wraps back to 1 (0 is reserved). */
+    buildPacket(pkt, 1, 1, epoch + 120, 0, 0, 0, 3.0f, 0, 0, 10, 3.1f);
+    receiveMSG(pkt, sizeof pkt);
+
+    CHECK(s_requestedCount == 0);
+    CHECK(s_postedCount == 6);
+    if (s_postedCount == 6) {
+        CHECK(s_posted[4].pv == 3.0f);
+        CHECK(s_posted[5].pv == 3.1f);
+    }
+}
+
+static void test_OutOfOrderGapAcrossWraparoundBoundary(void)
+{
+    installMocks();
+    uint32_t epoch = 3000000u;
+    uint8_t pkt[20];
+
+    /* Baseline 254 -> nextExpectedId becomes 255. */
+    buildPacket(pkt, 1, 254, epoch, 0, 0, 0, 1.0f, 0, 0, 10, 1.1f);
+    receiveMSG(pkt, sizeof pkt);
+
+    /* Packet 1 arrives early, skipping 255 - a 1-step forward gap that
+     * crosses the wrap boundary. Must be buffered + requested, not
+     * misread as a huge backward distance. */
+    buildPacket(pkt, 1, 1, epoch + 120, 0, 0, 0, 3.0f, 0, 0, 10, 3.1f);
+    receiveMSG(pkt, sizeof pkt);
+    CHECK(s_postedCount == 2);
+    CHECK(s_requestedCount == 1);
+    if (s_requestedCount == 1) {
+        CHECK(s_requestedIds[0] == 255);
+    }
+
+    /* 255 arrives: fills the gap and cascades straight into 1. */
+    buildPacket(pkt, 1, 255, epoch + 60, 0, 0, 0, 2.0f, 0, 0, 10, 2.1f);
+    receiveMSG(pkt, sizeof pkt);
+    CHECK(s_postedCount == 6);
+}
+
 int main(void)
 {
     RUN_TEST(unitTEST1);
@@ -311,6 +360,8 @@ int main(void)
     RUN_TEST(test_GapFillCascadesBufferedPacketsInOrder);
     RUN_TEST(test_StaleDuplicateIsIgnored);
     RUN_TEST(test_UnrecoverableGapSkipsAhead);
+    RUN_TEST(test_SequenceWrapsAroundPast255);
+    RUN_TEST(test_OutOfOrderGapAcrossWraparoundBoundary);
 
     printf("\n%d assertions, %d failures\n", g_assertions, g_failures);
     return g_failures == 0 ? 0 : 1;
