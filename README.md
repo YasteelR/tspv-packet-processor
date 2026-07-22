@@ -46,6 +46,21 @@ same `requestOldPacket` mechanism (`requestOldPacket(0)`). The device's
 reply is just an ordinary packet with a real, non-zero ID, so it's handled
 by `receiveMSG` exactly like the first packet ever seen.
 
+### A note on `postTSPV` and "time"
+
+The spec says the output should post "the individual TSPV float, as well as
+its time and status bytes", but the mandated signature -
+`postTSPV(uint8_t stat1, uint8_t stat2, float pv)` - has no parameter for
+time. Both can't be satisfied literally. This implementation honours the
+exact mandated signature ("use the function header") and uses each TSPV's
+absolute time (`epoch + offset`) *internally* instead - to enforce the
+"cannot process a TSPV with an earlier date than one already processed"
+ordering rule - rather than adding a fourth parameter the signature doesn't
+allow. If the intent was actually to surface the time to the consumer, the
+one-line change is to widen the signature to
+`postTSPV(uint8_t stat1, uint8_t stat2, uint32_t absTime, float pv)`; the
+value is already computed at the call site.
+
 ## Algorithm
 
 State kept between calls to `receiveMSG`:
