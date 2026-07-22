@@ -150,6 +150,57 @@ void unitTEST1(void)
     }
 }
 
+static void test_InOrderSequencePostsImmediately(void)
+{
+    installMocks();
+    uint32_t epoch = 900000u;
+    uint8_t pkt[20];
+
+    buildPacket(pkt, 1, 1, epoch, 0, 0, 0, 1.0f, 0, 0, 10, 2.0f);
+    receiveMSG(pkt, sizeof pkt);
+    buildPacket(pkt, 1, 2, epoch + 60, 0, 0, 0, 3.0f, 0, 0, 10, 4.0f);
+    receiveMSG(pkt, sizeof pkt);
+
+    CHECK(s_requestedCount == 0);
+    CHECK(s_postedCount == 4);
+    if (s_postedCount == 4) {
+        CHECK(s_posted[0].pv == 1.0f);
+        CHECK(s_posted[1].pv == 2.0f);
+        CHECK(s_posted[2].pv == 3.0f);
+        CHECK(s_posted[3].pv == 4.0f);
+    }
+}
+
+static void test_FloatByteDecodeRoundTrips(void)
+{
+    installMocks();
+    uint8_t pkt[20];
+    buildPacket(pkt, 1, 1, 950000u, 0xAA, 0xBB, 0, -12.375f, 0xCC, 0xDD, 3,
+                123.5f);
+    receiveMSG(pkt, sizeof pkt);
+
+    CHECK(s_postedCount == 2);
+    if (s_postedCount == 2) {
+        CHECK(s_posted[0].stat1 == 0xAA);
+        CHECK(s_posted[0].stat2 == 0xBB);
+        CHECK(s_posted[0].pv == -12.375f);
+        CHECK(s_posted[1].stat1 == 0xCC);
+        CHECK(s_posted[1].stat2 == 0xDD);
+        CHECK(s_posted[1].pv == 123.5f);
+    }
+}
+
+static void test_PacketIdZeroIsIgnoredAsIncomingData(void)
+{
+    installMocks();
+    uint8_t pkt[20];
+    buildPacket(pkt, 1, 0, 980000u, 0, 0, 0, 1.0f, 0, 0, 10, 1.1f);
+
+    receiveMSG(pkt, sizeof pkt); /* ID 0 is reserved, never valid inbound data */
+    CHECK(s_postedCount == 0);
+    CHECK(s_requestedCount == 0);
+}
+
 static void test_MalformedLengthIsIgnored(void)
 {
     installMocks();
@@ -380,6 +431,9 @@ static void test_OutOfOrderGapAcrossWraparoundBoundary(void)
 int main(void)
 {
     RUN_TEST(unitTEST1);
+    RUN_TEST(test_InOrderSequencePostsImmediately);
+    RUN_TEST(test_FloatByteDecodeRoundTrips);
+    RUN_TEST(test_PacketIdZeroIsIgnoredAsIncomingData);
     RUN_TEST(test_MalformedLengthIsIgnored);
     RUN_TEST(test_OutOfOrderPacketBuffersAndRequestsGap);
     RUN_TEST(test_SecondEarlyPacketDoesNotReRequestOutstandingIds);
