@@ -6,6 +6,7 @@
 
 enum {
     OFF_PACKET_ID = 1,
+    OFF_EPOCH = 2,
     OFF_TSPV1 = 6,
     OFF_TSPV2 = 13
 };
@@ -25,6 +26,8 @@ static bool s_requested[256];
 
 static bool s_haveBaseline;
 static uint8_t s_nextExpectedId;
+static bool s_haveLastTime;
+static uint32_t s_lastProcessedTime;
 
 static RequestOldPacketFn s_requestFn = requestOldPacket;
 static PostTSPVFn s_postFn = postTSPV;
@@ -65,20 +68,33 @@ static float readF32BE(const uint8_t *b)
     return f;
 }
 
-static void postOneTSPV(const uint8_t *tspv)
+/* Posts a single TSPV only if its absolute time (packet epoch + this
+ * TSPV's offset) is strictly newer than the last one actually posted -
+ * enforces "cannot process TSPVs with an earlier date than one already
+ * processed" from the spec, independent of PacketID sequencing. */
+static void processTSPV(uint32_t epochTime, const uint8_t *tspv)
 {
     uint8_t stat1 = tspv[0];
     uint8_t stat2 = tspv[1];
+    uint8_t offset = tspv[2];
     float pv = readF32BE(&tspv[3]);
+
+    uint32_t absTime = epochTime + offset;
+    if (s_haveLastTime && absTime <= s_lastProcessedTime) {
+        return;
+    }
     if (s_postFn) {
         s_postFn(stat1, stat2, pv);
     }
+    s_lastProcessedTime = absTime;
+    s_haveLastTime = true;
 }
 
 static void processPacketBytes(const uint8_t *data)
 {
-    postOneTSPV(&data[OFF_TSPV1]);
-    postOneTSPV(&data[OFF_TSPV2]);
+    uint32_t epoch = readU32BE(&data[OFF_EPOCH]);
+    processTSPV(epoch, &data[OFF_TSPV1]);
+    processTSPV(epoch, &data[OFF_TSPV2]);
 }
 
 static void storePending(uint8_t id, const uint8_t *data)
@@ -234,6 +250,8 @@ void tspv_resetState(void)
 {
     s_haveBaseline = false;
     s_nextExpectedId = 0;
+    s_haveLastTime = false;
+    s_lastProcessedTime = 0;
     for (unsigned i = 0; i < PENDING_CAPACITY; ++i) {
         s_pending[i].used = false;
     }

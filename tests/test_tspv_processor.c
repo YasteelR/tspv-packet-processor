@@ -302,6 +302,32 @@ static void test_UnrecoverableGapSkipsAhead(void)
     CHECK(s_requestedCount == 3); /* no new requests were made for the skip */
 }
 
+static void test_EarlierTimeTSPVIsSkippedButSequenceAdvances(void)
+{
+    installMocks();
+    uint32_t epoch = 2550000u;
+    uint8_t pkt[20];
+
+    buildPacket(pkt, 1, 1, epoch, 0, 0, 0, 1.0f, 0, 0, 10, 1.1f);
+    receiveMSG(pkt, sizeof pkt);
+    CHECK(s_postedCount == 2);
+
+    /* Packet 2 is next in PacketID sequence, but (clock hiccup on the
+     * device, etc.) both of its TSPV absolute times are not newer than
+     * what was already processed - both must be skipped, without
+     * breaking PacketID sequencing. */
+    buildPacket(pkt, 1, 2, epoch - 100, 0, 0, 0, 99.0f, 0, 0, 5, 99.1f);
+    receiveMSG(pkt, sizeof pkt);
+    CHECK(s_postedCount == 2); /* nothing new posted */
+
+    /* Packet 3, with a genuinely later time, posts normally - proving
+     * the sequence counter still advanced past packet 2. */
+    buildPacket(pkt, 1, 3, epoch + 120, 0, 0, 0, 3.0f, 0, 0, 10, 3.1f);
+    receiveMSG(pkt, sizeof pkt);
+    CHECK(s_postedCount == 4);
+    CHECK(s_requestedCount == 0); /* packet 2 was in-sequence, not missing */
+}
+
 static void test_SequenceWrapsAroundPast255(void)
 {
     installMocks();
@@ -362,6 +388,7 @@ int main(void)
     RUN_TEST(test_UnrecoverableGapSkipsAhead);
     RUN_TEST(test_SequenceWrapsAroundPast255);
     RUN_TEST(test_OutOfOrderGapAcrossWraparoundBoundary);
+    RUN_TEST(test_EarlierTimeTSPVIsSkippedButSequenceAdvances);
 
     printf("\n%d assertions, %d failures\n", g_assertions, g_failures);
     return g_failures == 0 ? 0 : 1;
