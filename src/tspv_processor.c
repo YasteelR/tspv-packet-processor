@@ -88,10 +88,41 @@ static void requestIfNeeded(uint8_t id)
     }
 }
 
+static PendingSlot *findPending(uint8_t id)
+{
+    for (unsigned i = 0; i < PENDING_CAPACITY; ++i) {
+        if (s_pending[i].used && s_pending[i].id == id) {
+            return &s_pending[i];
+        }
+    }
+    return NULL;
+}
+
+/* Applies any buffered packets that have become contiguous with
+ * s_nextExpectedId, in ID order, for as long as the buffer allows. */
+static void flushPending(void)
+{
+    for (;;) {
+        PendingSlot *slot = findPending(s_nextExpectedId);
+        if (!slot) {
+            break;
+        }
+        uint8_t data[TSPV_PACKET_LENGTH];
+        uint8_t id = slot->id;
+        memcpy(data, slot->data, TSPV_PACKET_LENGTH);
+        slot->used = false;
+        s_requested[id] = false;
+
+        processPacketBytes(data);
+        s_nextExpectedId = nextId(id);
+    }
+}
+
 /* First packet ever seen becomes the sequence's starting point; after
  * that, anything that isn't exactly the next expected PacketID gets
- * buffered and the gap is requested from the device. Applying buffered
- * packets back into order once the gap fills isn't wired up yet. */
+ * buffered and the gap is requested from the device. Once the missing
+ * packet(s) land, flushPending() cascades whatever is now contiguous
+ * back into order. */
 void receiveMSG(uint8_t *data, uint8_t length)
 {
     if (!data || length != TSPV_PACKET_LENGTH) {
@@ -107,6 +138,7 @@ void receiveMSG(uint8_t *data, uint8_t length)
         s_haveBaseline = true;
         s_nextExpectedId = nextId(id);
         processPacketBytes(data);
+        flushPending();
         return;
     }
 
@@ -114,6 +146,7 @@ void receiveMSG(uint8_t *data, uint8_t length)
         s_requested[id] = false;
         processPacketBytes(data);
         s_nextExpectedId = nextId(id);
+        flushPending();
         return;
     }
 

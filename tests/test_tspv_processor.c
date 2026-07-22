@@ -69,7 +69,8 @@ static void buildPacket(uint8_t out[20], uint8_t version, uint8_t packetId,
 
 /* ---- mock hooks: capture what receiveMSG() posts/requests ----------- */
 
-#define MAX_RECORDS 8
+/* Sized for the largest multi-packet cascade scenario tested below. */
+#define MAX_RECORDS 32
 
 typedef struct {
     uint8_t stat1;
@@ -175,9 +176,8 @@ static void test_OutOfOrderPacketBuffersAndRequestsGap(void)
     CHECK(s_requestedCount == 0);
 
     /* Packet 5 arrives early: 2, 3, 4 are missing and must be
-     * requested. Packet 5 itself isn't processed yet - applying
-     * buffered packets back into order isn't wired up until the gap
-     * actually fills (that comes in a later change). */
+     * requested. Packet 5 itself isn't posted yet - it's buffered
+     * until the gap in front of it is filled. */
     buildPacket(pkt, 1, 5, epoch + 240, 0, 0, 0, 5.0f, 0, 0, 10, 5.1f);
     receiveMSG(pkt, sizeof pkt);
     CHECK(s_postedCount == 2);
@@ -214,12 +214,51 @@ static void test_SecondEarlyPacketDoesNotReRequestOutstandingIds(void)
     }
 }
 
+static void test_GapFillCascadesBufferedPacketsInOrder(void)
+{
+    installMocks();
+    uint32_t epoch = 1800000u;
+    uint8_t pkt[20];
+
+    buildPacket(pkt, 1, 1, epoch, 0, 0, 0, 10.0f, 0, 0, 10, 10.1f);
+    receiveMSG(pkt, sizeof pkt);
+    CHECK(s_postedCount == 2);
+
+    /* 5 arrives early -> buffered, requests 2, 3, 4. */
+    buildPacket(pkt, 1, 5, epoch + 240, 0, 0, 0, 50.0f, 0, 0, 10, 50.1f);
+    receiveMSG(pkt, sizeof pkt);
+
+    /* 4 arrives (still missing 2, 3) -> also buffered. */
+    buildPacket(pkt, 1, 4, epoch + 180, 0, 0, 0, 40.0f, 0, 0, 10, 40.1f);
+    receiveMSG(pkt, sizeof pkt);
+    CHECK(s_postedCount == 2); /* nothing new posted yet */
+
+    /* 2 arrives: matches next-expected, applied immediately. */
+    buildPacket(pkt, 1, 2, epoch + 60, 0, 0, 0, 20.0f, 0, 0, 10, 20.1f);
+    receiveMSG(pkt, sizeof pkt);
+    CHECK(s_postedCount == 4);
+
+    /* 3 arrives: fills the last hole, cascading 3 -> 4 -> 5 in order. */
+    buildPacket(pkt, 1, 3, epoch + 120, 0, 0, 0, 30.0f, 0, 0, 10, 30.1f);
+    receiveMSG(pkt, sizeof pkt);
+
+    CHECK(s_postedCount == 10);
+    if (s_postedCount == 10) {
+        float expected[10] = {10.0f, 10.1f, 20.0f, 20.1f, 30.0f,
+                               30.1f, 40.0f, 40.1f, 50.0f, 50.1f};
+        for (int i = 0; i < 10; ++i) {
+            CHECK(s_posted[i].pv == expected[i]);
+        }
+    }
+}
+
 int main(void)
 {
     RUN_TEST(unitTEST1);
     RUN_TEST(test_MalformedLengthIsIgnored);
     RUN_TEST(test_OutOfOrderPacketBuffersAndRequestsGap);
     RUN_TEST(test_SecondEarlyPacketDoesNotReRequestOutstandingIds);
+    RUN_TEST(test_GapFillCascadesBufferedPacketsInOrder);
 
     printf("\n%d assertions, %d failures\n", g_assertions, g_failures);
     return g_failures == 0 ? 0 : 1;
