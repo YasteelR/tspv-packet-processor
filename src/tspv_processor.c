@@ -1,9 +1,37 @@
 #include "tspv_processor.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
+enum {
+    OFF_PACKET_ID = 1,
+    OFF_TSPV1 = 6,
+    OFF_TSPV2 = 13
+};
+
+/* A little headroom for packets that arrive while we're still waiting
+ * on the device to resend whatever is missing. */
+#define PENDING_CAPACITY 8u
+
+typedef struct {
+    bool used;
+    uint8_t id;
+    uint8_t data[TSPV_PACKET_LENGTH];
+} PendingSlot;
+
+static PendingSlot s_pending[PENDING_CAPACITY];
+
+static bool s_haveBaseline;
+static uint8_t s_nextExpectedId;
+
+static RequestOldPacketFn s_requestFn = requestOldPacket;
 static PostTSPVFn s_postFn = postTSPV;
+
+static uint8_t nextId(uint8_t id)
+{
+    return (id == 255u) ? 1u : (uint8_t)(id + 1u);
+}
 
 static uint32_t readU32BE(const uint8_t *b)
 {
@@ -29,17 +57,64 @@ static void postOneTSPV(const uint8_t *tspv)
     }
 }
 
-/* First pass: assume every packet that arrives is the next one in
- * sequence and just decode + post both TSPVs. PacketID gap detection/
- * recovery and TSPV time-ordering are not handled yet. */
+static void processPacketBytes(const uint8_t *data)
+{
+    postOneTSPV(&data[OFF_TSPV1]);
+    postOneTSPV(&data[OFF_TSPV2]);
+}
+
+static void storePending(uint8_t id, const uint8_t *data)
+{
+    for (unsigned i = 0; i < PENDING_CAPACITY; ++i) {
+        if (!s_pending[i].used) {
+            s_pending[i].used = true;
+            s_pending[i].id = id;
+            memcpy(s_pending[i].data, data, TSPV_PACKET_LENGTH);
+            return;
+        }
+    }
+    /* Buffer full - drop it rather than crash. Shouldn't happen given
+     * the device only ever has a handful of packets outstanding. */
+}
+
+/* First packet ever seen becomes the sequence's starting point; after
+ * that, anything that isn't exactly the next expected PacketID gets
+ * buffered and the gap is requested from the device. Applying buffered
+ * packets back into order once the gap fills isn't wired up yet. */
 void receiveMSG(uint8_t *data, uint8_t length)
 {
     if (!data || length != TSPV_PACKET_LENGTH) {
         return;
     }
 
-    postOneTSPV(&data[6]);  /* TSPV #1 */
-    postOneTSPV(&data[13]); /* TSPV #2 */
+    uint8_t id = data[OFF_PACKET_ID];
+    if (id == 0u) {
+        return; /* reserved for outbound "send latest data" requests */
+    }
+
+    if (!s_haveBaseline) {
+        s_haveBaseline = true;
+        s_nextExpectedId = nextId(id);
+        processPacketBytes(data);
+        return;
+    }
+
+    if (id == s_nextExpectedId) {
+        processPacketBytes(data);
+        s_nextExpectedId = nextId(id);
+        return;
+    }
+
+    /* Out of order: hold on to it and ask the device to resend
+     * whatever is missing in between. */
+    storePending(id, data);
+    uint8_t missing = s_nextExpectedId;
+    while (missing != id) {
+        if (s_requestFn) {
+            s_requestFn(missing);
+        }
+        missing = nextId(missing);
+    }
 }
 
 uint8_t *requestOldPacket(uint8_t packetid)
@@ -60,11 +135,15 @@ void postTSPV(uint8_t stat1, uint8_t stat2, float pv)
 
 void tspv_setHooks(RequestOldPacketFn requestFn, PostTSPVFn postFn)
 {
-    (void)requestFn; /* no gap detection yet, nothing to hook up */
+    s_requestFn = requestFn ? requestFn : requestOldPacket;
     s_postFn = postFn ? postFn : postTSPV;
 }
 
 void tspv_resetState(void)
 {
-    /* no sequencing state exists yet */
+    s_haveBaseline = false;
+    s_nextExpectedId = 0;
+    for (unsigned i = 0; i < PENDING_CAPACITY; ++i) {
+        s_pending[i].used = false;
+    }
 }

@@ -30,7 +30,44 @@ static const char *g_currentTest = "";
         fn();                                                               \
     } while (0)
 
-/* ---- mock hook: capture what receiveMSG() posts --------------------- */
+/* ---- packet-building helper for tests that need specific IDs/times -- */
+
+static void writeU32BE(uint8_t *b, uint32_t v)
+{
+    b[0] = (uint8_t)(v >> 24);
+    b[1] = (uint8_t)(v >> 16);
+    b[2] = (uint8_t)(v >> 8);
+    b[3] = (uint8_t)v;
+}
+
+static void writeF32BE(uint8_t *b, float f)
+{
+    uint32_t bits;
+    memcpy(&bits, &f, sizeof(bits));
+    writeU32BE(b, bits);
+}
+
+static void buildPacket(uint8_t out[20], uint8_t version, uint8_t packetId,
+                         uint32_t epoch, uint8_t stat1a, uint8_t stat2a,
+                         uint8_t offsetA, float pvA, uint8_t stat1b,
+                         uint8_t stat2b, uint8_t offsetB, float pvB)
+{
+    out[0] = version;
+    out[1] = packetId;
+    writeU32BE(&out[2], epoch);
+
+    out[6] = stat1a;
+    out[7] = stat2a;
+    out[8] = offsetA;
+    writeF32BE(&out[9], pvA);
+
+    out[13] = stat1b;
+    out[14] = stat2b;
+    out[15] = offsetB;
+    writeF32BE(&out[16], pvB);
+}
+
+/* ---- mock hooks: capture what receiveMSG() posts/requests ----------- */
 
 #define MAX_RECORDS 8
 
@@ -43,6 +80,9 @@ typedef struct {
 static PostedRecord s_posted[MAX_RECORDS];
 static int s_postedCount;
 
+static uint8_t s_requestedIds[MAX_RECORDS];
+static int s_requestedCount;
+
 static void mockPost(uint8_t stat1, uint8_t stat2, float pv)
 {
     if (s_postedCount < MAX_RECORDS) {
@@ -53,11 +93,21 @@ static void mockPost(uint8_t stat1, uint8_t stat2, float pv)
     }
 }
 
+static uint8_t *mockRequest(uint8_t packetid)
+{
+    static uint8_t dummy;
+    if (s_requestedCount < MAX_RECORDS) {
+        s_requestedIds[s_requestedCount++] = packetid;
+    }
+    return &dummy;
+}
+
 static void installMocks(void)
 {
     s_postedCount = 0;
+    s_requestedCount = 0;
     tspv_resetState();
-    tspv_setHooks(NULL, mockPost);
+    tspv_setHooks(mockRequest, mockPost);
 }
 
 /* ------------------------------------------------------------------------
@@ -102,7 +152,8 @@ void unitTEST1(void)
 static void test_MalformedLengthIsIgnored(void)
 {
     installMocks();
-    uint8_t packet[20] = {0};
+    uint8_t packet[20];
+    buildPacket(packet, 1, 1, 1000000u, 0, 0, 0, 1.0f, 0, 0, 10, 1.1f);
 
     receiveMSG(packet, 19); /* wrong length */
     CHECK(s_postedCount == 0);
@@ -111,10 +162,38 @@ static void test_MalformedLengthIsIgnored(void)
     CHECK(s_postedCount == 2);
 }
 
+static void test_OutOfOrderPacketBuffersAndRequestsGap(void)
+{
+    installMocks();
+    uint32_t epoch = 1000000u;
+    uint8_t pkt[20];
+
+    /* Baseline: first packet ever seen, accepted unconditionally. */
+    buildPacket(pkt, 1, 1, epoch, 0, 0, 0, 1.0f, 0, 0, 10, 1.1f);
+    receiveMSG(pkt, sizeof pkt);
+    CHECK(s_postedCount == 2);
+    CHECK(s_requestedCount == 0);
+
+    /* Packet 5 arrives early: 2, 3, 4 are missing and must be
+     * requested. Packet 5 itself isn't processed yet - applying
+     * buffered packets back into order isn't wired up until the gap
+     * actually fills (that comes in a later change). */
+    buildPacket(pkt, 1, 5, epoch + 240, 0, 0, 0, 5.0f, 0, 0, 10, 5.1f);
+    receiveMSG(pkt, sizeof pkt);
+    CHECK(s_postedCount == 2);
+    CHECK(s_requestedCount == 3);
+    if (s_requestedCount == 3) {
+        CHECK(s_requestedIds[0] == 2);
+        CHECK(s_requestedIds[1] == 3);
+        CHECK(s_requestedIds[2] == 4);
+    }
+}
+
 int main(void)
 {
     RUN_TEST(unitTEST1);
     RUN_TEST(test_MalformedLengthIsIgnored);
+    RUN_TEST(test_OutOfOrderPacketBuffersAndRequestsGap);
 
     printf("\n%d assertions, %d failures\n", g_assertions, g_failures);
     return g_failures == 0 ? 0 : 1;
