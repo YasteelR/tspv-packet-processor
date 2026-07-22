@@ -252,6 +252,56 @@ static void test_GapFillCascadesBufferedPacketsInOrder(void)
     }
 }
 
+static void test_StaleDuplicateIsIgnored(void)
+{
+    installMocks();
+    uint32_t epoch = 2100000u;
+    uint8_t pkt[20];
+
+    buildPacket(pkt, 1, 1, epoch, 0, 0, 0, 1.0f, 0, 0, 10, 1.1f);
+    receiveMSG(pkt, sizeof pkt);
+    buildPacket(pkt, 1, 2, epoch + 60, 0, 0, 0, 2.0f, 0, 0, 10, 2.1f);
+    receiveMSG(pkt, sizeof pkt);
+    CHECK(s_postedCount == 4);
+
+    /* Packet 1 (already processed, 1 step behind nextExpectedId=3) is
+     * redelivered - must be ignored, not treated as a huge forward gap
+     * that requests everything from 3 around to 1. */
+    buildPacket(pkt, 1, 1, epoch, 0, 0, 0, 1.0f, 0, 0, 10, 1.1f);
+    receiveMSG(pkt, sizeof pkt);
+    CHECK(s_postedCount == 4);
+    CHECK(s_requestedCount == 0);
+}
+
+static void test_UnrecoverableGapSkipsAhead(void)
+{
+    installMocks();
+    uint32_t epoch = 2400000u;
+    uint8_t pkt[20];
+
+    buildPacket(pkt, 1, 1, epoch, 0, 0, 0, 1.0f, 0, 0, 10, 1.1f);
+    receiveMSG(pkt, sizeof pkt);
+
+    /* Packet 5 arrives early -> buffered, requests issued for 2,3,4. */
+    buildPacket(pkt, 1, 5, epoch + 240, 0, 0, 0, 5.0f, 0, 0, 10, 5.1f);
+    receiveMSG(pkt, sizeof pkt);
+    CHECK(s_requestedCount == 3);
+
+    /* Packet 20 arrives: the gap from "2" to "20" is 18, well beyond
+     * what the device can still supply (it only keeps its last 4) -
+     * skip ahead, dropping the buffered packet 5 and the outstanding
+     * requests, and process 20 directly. */
+    buildPacket(pkt, 1, 20, epoch + 900, 0, 0, 0, 20.0f, 0, 0, 10, 20.1f);
+    receiveMSG(pkt, sizeof pkt);
+
+    CHECK(s_postedCount == 4); /* packet 1 (2) + packet 20 (2); 5 was dropped */
+    if (s_postedCount == 4) {
+        CHECK(s_posted[2].pv == 20.0f);
+        CHECK(s_posted[3].pv == 20.1f);
+    }
+    CHECK(s_requestedCount == 3); /* no new requests were made for the skip */
+}
+
 int main(void)
 {
     RUN_TEST(unitTEST1);
@@ -259,6 +309,8 @@ int main(void)
     RUN_TEST(test_OutOfOrderPacketBuffersAndRequestsGap);
     RUN_TEST(test_SecondEarlyPacketDoesNotReRequestOutstandingIds);
     RUN_TEST(test_GapFillCascadesBufferedPacketsInOrder);
+    RUN_TEST(test_StaleDuplicateIsIgnored);
+    RUN_TEST(test_UnrecoverableGapSkipsAhead);
 
     printf("\n%d assertions, %d failures\n", g_assertions, g_failures);
     return g_failures == 0 ? 0 : 1;

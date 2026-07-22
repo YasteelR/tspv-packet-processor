@@ -34,6 +34,23 @@ static uint8_t nextId(uint8_t id)
     return (id == 255u) ? 1u : (uint8_t)(id + 1u);
 }
 
+/* Maps 1..255 -> 0..254 so modulo arithmetic on the 255-value ID space
+ * (0 is reserved and never part of the sequence) is straightforward. */
+static uint8_t idIndex(uint8_t id)
+{
+    return (uint8_t)(id - 1u);
+}
+
+/* Number of forward steps to go from `from` to `to` around the ID space. */
+static uint8_t forwardDistance(uint8_t from, uint8_t to)
+{
+    int d = (int)idIndex(to) - (int)idIndex(from);
+    if (d < 0) {
+        d += 255;
+    }
+    return (uint8_t)d;
+}
+
 static uint32_t readU32BE(const uint8_t *b)
 {
     return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
@@ -98,6 +115,14 @@ static PendingSlot *findPending(uint8_t id)
     return NULL;
 }
 
+static void discardAllPending(void)
+{
+    for (unsigned i = 0; i < PENDING_CAPACITY; ++i) {
+        s_pending[i].used = false;
+    }
+    memset(s_requested, 0, sizeof(s_requested));
+}
+
 /* Applies any buffered packets that have become contiguous with
  * s_nextExpectedId, in ID order, for as long as the buffer allows. */
 static void flushPending(void)
@@ -150,17 +175,37 @@ void receiveMSG(uint8_t *data, uint8_t length)
         return;
     }
 
-    /* Out of order: hold on to it and ask the device to resend
-     * whatever is missing in between. Each missing ID is only
-     * requested once - if a second out-of-order packet arrives before
-     * the first gap is filled, IDs already outstanding must not be
-     * re-requested. */
-    storePending(id, data);
-    uint8_t missing = s_nextExpectedId;
-    while (missing != id) {
-        requestIfNeeded(missing);
-        missing = nextId(missing);
+    uint8_t forwardGap = forwardDistance(s_nextExpectedId, id);
+    uint8_t backwardGap = (uint8_t)(255u - forwardGap);
+
+    if (backwardGap <= TSPV_RECOVERABLE_GAP) {
+        /* This ID is behind what we already processed (a duplicate /
+         * stale re-delivery) - ignore it, we cannot go backwards. */
+        return;
     }
+
+    if (forwardGap <= TSPV_RECOVERABLE_GAP) {
+        /* Out of order, but still within the device's 4-packet
+         * history: hold on to it and ask for whatever is missing in
+         * between. Each missing ID is only requested once - if a
+         * second out-of-order packet arrives before the first gap is
+         * filled, IDs already outstanding must not be re-requested. */
+        storePending(id, data);
+        uint8_t missing = s_nextExpectedId;
+        for (uint8_t i = 0; i < forwardGap; ++i) {
+            requestIfNeeded(missing);
+            missing = nextId(missing);
+        }
+        return;
+    }
+
+    /* Gap is bigger than the device's history: the missing packets can
+     * never be recovered, so the only option is to skip ahead and keep
+     * processing from here. */
+    discardAllPending();
+    processPacketBytes(data);
+    s_nextExpectedId = nextId(id);
+    flushPending();
 }
 
 uint8_t *requestOldPacket(uint8_t packetid)
